@@ -1,0 +1,268 @@
+name: Deploy to AWS ECS
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT_NAME: microservices-demo
+
+jobs:
+  build-and-test:
+    name: Build and Test Services
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build Service 1
+        run: |
+          cd service1
+          mvn clean package -DskipTests
+
+      - name: Build Service 2
+        run: |
+          cd service2
+          mvn clean package -DskipTests
+
+      - name: Run Tests - Service 1
+        run: |
+          cd service1
+          mvn test
+
+      - name: Run Tests - Service 2
+        run: |
+          cd service2
+          mvn test
+
+      - name: Upload Service 1 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: service1-jar
+          path: service1/target/*.jar
+
+      - name: Upload Service 2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: service2-jar
+          path: service2/target/*.jar
+
+  deploy-infrastructure:
+    name: Deploy AWS Infrastructure
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy ECR Repositories
+        run: |
+          aws cloudformation deploy \
+            --template-file infrastructure/ecr-repositories.yaml \
+            --stack-name ${{ env.ENVIRONMENT_NAME }}-ecr \
+            --parameter-overrides EnvironmentName=${{ env.ENVIRONMENT_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --no-fail-on-empty-changeset
+
+      - name: Get ECR Repository URIs
+        id: ecr-uris
+        run: |
+          SERVICE1_REPO_URI=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.ENVIRONMENT_NAME }}-ecr \
+            --query "Stacks[0].Outputs[?OutputKey=='Service1RepositoryUri'].OutputValue" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+
+          SERVICE2_REPO_URI=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.ENVIRONMENT_NAME }}-ecr \
+            --query "Stacks[0].Outputs[?OutputKey=='Service2RepositoryUri'].OutputValue" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+
+          echo "service1_repo_uri=$SERVICE1_REPO_URI" >> $GITHUB_OUTPUT
+          echo "service2_repo_uri=$SERVICE2_REPO_URI" >> $GITHUB_OUTPUT
+
+    outputs:
+      service1_repo_uri: ${{ steps.ecr-uris.outputs.service1_repo_uri }}
+      service2_repo_uri: ${{ steps.ecr-uris.outputs.service2_repo_uri }}
+
+  build-and-push-docker:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+    needs: deploy-infrastructure
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push Service 1 image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.ENVIRONMENT_NAME }}/service1
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd service1
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "SERVICE1_IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Build, tag, and push Service 2 image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ env.ENVIRONMENT_NAME }}/service2
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          cd service2
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "SERVICE2_IMAGE=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Save image URIs
+        run: |
+          echo "${{ steps.login-ecr.outputs.registry }}/${{ env.ENVIRONMENT_NAME }}/service1:${{ github.sha }}" > service1-image.txt
+          echo "${{ steps.login-ecr.outputs.registry }}/${{ env.ENVIRONMENT_NAME }}/service2:${{ github.sha }}" > service2-image.txt
+
+      - name: Upload image URIs
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-uris
+          path: |
+            service1-image.txt
+            service2-image.txt
+
+  deploy-to-ecs:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+    needs: build-and-push-docker
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Download image URIs
+        uses: actions/download-artifact@v4
+        with:
+          name: image-uris
+
+      - name: Set image URIs
+        id: image-uris
+        run: |
+          SERVICE1_IMAGE=$(cat service1-image.txt)
+          SERVICE2_IMAGE=$(cat service2-image.txt)
+          echo "service1_image=$SERVICE1_IMAGE" >> $GITHUB_OUTPUT
+          echo "service2_image=$SERVICE2_IMAGE" >> $GITHUB_OUTPUT
+
+      - name: Deploy ECS Infrastructure
+        run: |
+          aws cloudformation deploy \
+            --template-file infrastructure/cloudformation-stack.yaml \
+            --stack-name ${{ env.ENVIRONMENT_NAME }}-infra \
+            --parameter-overrides \
+              EnvironmentName=${{ env.ENVIRONMENT_NAME }} \
+              Service1ImageUri=${{ steps.image-uris.outputs.service1_image }} \
+              Service2ImageUri=${{ steps.image-uris.outputs.service2_image }} \
+            --capabilities CAPABILITY_IAM \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Get Load Balancer DNS
+        id: alb-dns
+        run: |
+          ALB_DNS=$(aws cloudformation describe-stacks \
+            --stack-name ${{ env.ENVIRONMENT_NAME }}-infra \
+            --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDNS'].OutputValue" \
+            --output text \
+            --region ${{ env.AWS_REGION }})
+          echo "alb_dns=$ALB_DNS" >> $GITHUB_OUTPUT
+          echo "### Deployment Successful! :rocket:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Your services are available at:**" >> $GITHUB_STEP_SUMMARY
+          echo "- API 1: http://$ALB_DNS/api/api1" >> $GITHUB_STEP_SUMMARY
+          echo "- API 2: http://$ALB_DNS/api/api2" >> $GITHUB_STEP_SUMMARY
+          echo "- Health: http://$ALB_DNS/api/health" >> $GITHUB_STEP_SUMMARY
+
+      - name: Wait for ECS services to stabilize
+        run: |
+          echo "Waiting for services to stabilize..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.ENVIRONMENT_NAME }}-cluster \
+            --services service1 service2 \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Verify Deployment
+        run: |
+          ALB_DNS=${{ steps.alb-dns.outputs.alb_dns }}
+          echo "Testing health endpoint..."
+          for i in {1..10}; do
+            if curl -f -s http://$ALB_DNS/api/health > /dev/null; then
+              echo "✅ Health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i failed, retrying in 30 seconds..."
+            sleep 30
+          done
+          echo "❌ Health check failed after 10 attempts"
+          exit 1
+
+  notify:
+    name: Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: [deploy-to-ecs]
+    if: always()
+
+    steps:
+      - name: Deployment Success
+        if: needs.deploy-to-ecs.result == 'success'
+        run: |
+          echo "✅ Deployment completed successfully!"
+
+      - name: Deployment Failure
+        if: needs.deploy-to-ecs.result == 'failure'
+        run: |
+          echo "❌ Deployment failed!"
+          exit 1

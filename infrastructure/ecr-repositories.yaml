@@ -1,0 +1,78 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ECR Repositories for microservices'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: microservices-demo
+    Description: Environment name prefix
+
+Resources:
+  Service1Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${EnvironmentName}/service1
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Service1-ECR
+
+  Service2Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub ${EnvironmentName}/service2
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Service2-ECR
+
+Outputs:
+  Service1RepositoryUri:
+    Description: URI of Service 1 ECR repository
+    Value: !GetAtt Service1Repository.RepositoryUri
+    Export:
+      Name: !Sub ${EnvironmentName}-Service1-ECR-URI
+
+  Service2RepositoryUri:
+    Description: URI of Service 2 ECR repository
+    Value: !GetAtt Service2Repository.RepositoryUri
+    Export:
+      Name: !Sub ${EnvironmentName}-Service2-ECR-URI

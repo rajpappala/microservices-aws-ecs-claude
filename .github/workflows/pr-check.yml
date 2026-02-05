@@ -1,0 +1,53 @@
+name: Pull Request Check
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build Service 1
+        run: |
+          cd service1
+          mvn clean package
+
+      - name: Build Service 2
+        run: |
+          cd service2
+          mvn clean package
+
+      - name: Run Tests
+        run: |
+          cd service1 && mvn test
+          cd ../service2 && mvn test
+
+      - name: Check Docker builds
+        run: |
+          cd service1 && docker build -t service1:pr-check .
+          cd ../service2 && docker build -t service2:pr-check .
+
+      - name: PR Check Summary
+        run: |
+          echo "### ✅ PR Check Passed!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All checks completed successfully:" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Service 1 built successfully" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Service 2 built successfully" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ All tests passed" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Docker images built successfully" >> $GITHUB_STEP_SUMMARY

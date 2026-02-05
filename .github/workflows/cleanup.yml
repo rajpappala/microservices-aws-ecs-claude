@@ -1,0 +1,72 @@
+name: Cleanup AWS Resources
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DELETE to confirm cleanup'
+        required: true
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT_NAME: microservices-demo
+
+jobs:
+  cleanup:
+    name: Delete AWS Resources
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'DELETE'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Delete ECS Infrastructure
+        run: |
+          echo "Deleting ECS infrastructure..."
+          aws cloudformation delete-stack \
+            --stack-name ${{ env.ENVIRONMENT_NAME }}-infra \
+            --region ${{ env.AWS_REGION }} || true
+
+          echo "Waiting for infrastructure stack deletion..."
+          aws cloudformation wait stack-delete-complete \
+            --stack-name ${{ env.ENVIRONMENT_NAME }}-infra \
+            --region ${{ env.AWS_REGION }} || true
+
+      - name: Delete ECR Images
+        run: |
+          echo "Deleting ECR images..."
+          aws ecr batch-delete-image \
+            --repository-name ${{ env.ENVIRONMENT_NAME }}/service1 \
+            --image-ids imageTag=latest \
+            --region ${{ env.AWS_REGION }} || true
+
+          aws ecr batch-delete-image \
+            --repository-name ${{ env.ENVIRONMENT_NAME }}/service2 \
+            --image-ids imageTag=latest \
+            --region ${{ env.AWS_REGION }} || true
+
+      - name: Delete ECR Repositories
+        run: |
+          echo "Deleting ECR repositories..."
+          aws cloudformation delete-stack \
+            --stack-name ${{ env.ENVIRONMENT_NAME }}-ecr \
+            --region ${{ env.AWS_REGION }} || true
+
+          echo "Waiting for ECR stack deletion..."
+          aws cloudformation wait stack-delete-complete \
+            --stack-name ${{ env.ENVIRONMENT_NAME }}-ecr \
+            --region ${{ env.AWS_REGION }} || true
+
+      - name: Cleanup Summary
+        run: |
+          echo "### 🗑️ Cleanup Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All AWS resources have been deleted." >> $GITHUB_STEP_SUMMARY
