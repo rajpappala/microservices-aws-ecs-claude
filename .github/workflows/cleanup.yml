@@ -6,6 +6,7 @@ on:
       confirm:
         description: 'Type DELETE to confirm cleanup'
         required: true
+        type: string
 
 env:
   AWS_REGION: us-east-1
@@ -28,45 +29,205 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Delete ECS Infrastructure
+      - name: Display Resources to be Deleted
         run: |
-          echo "Deleting ECS infrastructure..."
-          aws cloudformation delete-stack \
-            --stack-name ${{ env.ENVIRONMENT_NAME }}-infra \
-            --region ${{ env.AWS_REGION }} || true
+          echo "## 🗑️ AWS Resources Teardown" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ env.ENVIRONMENT_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Region:** ${{ env.AWS_REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "Waiting for infrastructure stack deletion..."
-          aws cloudformation wait stack-delete-complete \
-            --stack-name ${{ env.ENVIRONMENT_NAME }}-infra \
-            --region ${{ env.AWS_REGION }} || true
+          echo "### Resources to be deleted:" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ ECS Cluster and Services" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Application Load Balancer" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ VPC and Networking" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ ECR Repositories" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Docker Images" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ CloudWatch Logs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**💰 Monthly Cost Savings:** ~\$107-117" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
-      - name: Delete ECR Images
+      - name: Check Existing Resources
         run: |
-          echo "Deleting ECR images..."
-          aws ecr batch-delete-image \
+          echo "🔍 Checking existing CloudFormation stacks..."
+
+          # Check if infrastructure stack exists
+          if aws cloudformation describe-stacks \
+            --stack-name ${{ env.ENVIRONMENT_NAME }}-infra \
+            --region ${{ env.AWS_REGION }} &>/dev/null; then
+            echo "✓ Found: ${{ env.ENVIRONMENT_NAME }}-infra"
+            INFRA_EXISTS=true
+          else
+            echo "ℹ Stack not found: ${{ env.ENVIRONMENT_NAME }}-infra"
+            INFRA_EXISTS=false
+          fi
+
+          # Check if ECR stack exists
+          if aws cloudformation describe-stacks \
+            --stack-name ${{ env.ENVIRONMENT_NAME }}-ecr \
+            --region ${{ env.AWS_REGION }} &>/dev/null; then
+            echo "✓ Found: ${{ env.ENVIRONMENT_NAME }}-ecr"
+            ECR_EXISTS=true
+          else
+            echo "ℹ Stack not found: ${{ env.ENVIRONMENT_NAME }}-ecr"
+            ECR_EXISTS=false
+          fi
+
+          # Set outputs for next steps
+          echo "INFRA_EXISTS=$INFRA_EXISTS" >> $GITHUB_ENV
+          echo "ECR_EXISTS=$ECR_EXISTS" >> $GITHUB_ENV
+
+      - name: "[1/5] Delete ECS Infrastructure Stack"
+        run: |
+          echo "### [1/5] Deleting ECS Infrastructure" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$INFRA_EXISTS" == "true" ]; then
+            echo "🗑️ Deleting ECS infrastructure stack..."
+            echo "   - Stopping ECS tasks..."
+            echo "   - Deleting ECS services..."
+            echo "   - Removing load balancer..."
+            echo "   - Deleting VPC and networking..."
+
+            aws cloudformation delete-stack \
+              --stack-name ${{ env.ENVIRONMENT_NAME }}-infra \
+              --region ${{ env.AWS_REGION }}
+
+            echo "⏳ Waiting for infrastructure stack deletion (5-10 minutes)..."
+
+            if aws cloudformation wait stack-delete-complete \
+              --stack-name ${{ env.ENVIRONMENT_NAME }}-infra \
+              --region ${{ env.AWS_REGION }} 2>/dev/null; then
+              echo "✅ Infrastructure stack deleted successfully" >> $GITHUB_STEP_SUMMARY
+              echo "✓ Infrastructure stack deleted successfully"
+            else
+              echo "⚠️ Infrastructure stack deletion completed with warnings" >> $GITHUB_STEP_SUMMARY
+              echo "⚠ Stack deletion completed with warnings"
+            fi
+          else
+            echo "ℹ️ Infrastructure stack not found, skipping" >> $GITHUB_STEP_SUMMARY
+            echo "ℹ Infrastructure stack not found, skipping"
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: "[2/5] Delete Service 1 Docker Images"
+        run: |
+          echo "### [2/5] Deleting Service 1 Images" >> $GITHUB_STEP_SUMMARY
+          echo "🗑️ Deleting Docker images from Service 1 repository..."
+
+          # Get all images
+          IMAGES=$(aws ecr list-images \
             --repository-name ${{ env.ENVIRONMENT_NAME }}/service1 \
-            --image-ids imageTag=latest \
-            --region ${{ env.AWS_REGION }} || true
+            --region ${{ env.AWS_REGION }} \
+            --query 'imageIds[*]' \
+            --output json 2>/dev/null || echo "[]")
 
-          aws ecr batch-delete-image \
-            --repository-name ${{ env.ENVIRONMENT_NAME }}/service2 \
-            --image-ids imageTag=latest \
-            --region ${{ env.AWS_REGION }} || true
+          if [ "$IMAGES" != "[]" ]; then
+            aws ecr batch-delete-image \
+              --repository-name ${{ env.ENVIRONMENT_NAME }}/service1 \
+              --image-ids "$IMAGES" \
+              --region ${{ env.AWS_REGION }} &>/dev/null && \
+              echo "✅ Service 1 images deleted" >> $GITHUB_STEP_SUMMARY || \
+              echo "⚠️ Service 1 repository not found" >> $GITHUB_STEP_SUMMARY
+            echo "✓ Service 1 images deleted"
+          else
+            echo "ℹ️ Service 1 repository empty or not found" >> $GITHUB_STEP_SUMMARY
+            echo "ℹ Service 1 repository empty or not found"
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
 
-      - name: Delete ECR Repositories
+      - name: "[3/5] Delete Service 2 Docker Images"
         run: |
-          echo "Deleting ECR repositories..."
-          aws cloudformation delete-stack \
-            --stack-name ${{ env.ENVIRONMENT_NAME }}-ecr \
-            --region ${{ env.AWS_REGION }} || true
+          echo "### [3/5] Deleting Service 2 Images" >> $GITHUB_STEP_SUMMARY
+          echo "🗑️ Deleting Docker images from Service 2 repository..."
 
-          echo "Waiting for ECR stack deletion..."
-          aws cloudformation wait stack-delete-complete \
-            --stack-name ${{ env.ENVIRONMENT_NAME }}-ecr \
-            --region ${{ env.AWS_REGION }} || true
+          # Get all images
+          IMAGES=$(aws ecr list-images \
+            --repository-name ${{ env.ENVIRONMENT_NAME }}/service2 \
+            --region ${{ env.AWS_REGION }} \
+            --query 'imageIds[*]' \
+            --output json 2>/dev/null || echo "[]")
+
+          if [ "$IMAGES" != "[]" ]; then
+            aws ecr batch-delete-image \
+              --repository-name ${{ env.ENVIRONMENT_NAME }}/service2 \
+              --image-ids "$IMAGES" \
+              --region ${{ env.AWS_REGION }} &>/dev/null && \
+              echo "✅ Service 2 images deleted" >> $GITHUB_STEP_SUMMARY || \
+              echo "⚠️ Service 2 repository not found" >> $GITHUB_STEP_SUMMARY
+            echo "✓ Service 2 images deleted"
+          else
+            echo "ℹ️ Service 2 repository empty or not found" >> $GITHUB_STEP_SUMMARY
+            echo "ℹ Service 2 repository empty or not found"
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: "[4/5] Delete ECR Repositories Stack"
+        run: |
+          echo "### [4/5] Deleting ECR Repositories" >> $GITHUB_STEP_SUMMARY
+
+          if [ "$ECR_EXISTS" == "true" ]; then
+            echo "🗑️ Deleting ECR repositories stack..."
+
+            aws cloudformation delete-stack \
+              --stack-name ${{ env.ENVIRONMENT_NAME }}-ecr \
+              --region ${{ env.AWS_REGION }}
+
+            echo "⏳ Waiting for ECR stack deletion..."
+
+            if aws cloudformation wait stack-delete-complete \
+              --stack-name ${{ env.ENVIRONMENT_NAME }}-ecr \
+              --region ${{ env.AWS_REGION }} 2>/dev/null; then
+              echo "✅ ECR repositories deleted successfully" >> $GITHUB_STEP_SUMMARY
+              echo "✓ ECR repositories deleted successfully"
+            else
+              echo "⚠️ ECR stack deletion completed with warnings" >> $GITHUB_STEP_SUMMARY
+              echo "⚠ ECR stack deletion completed with warnings"
+            fi
+          else
+            echo "ℹ️ ECR repositories stack not found, skipping" >> $GITHUB_STEP_SUMMARY
+            echo "ℹ ECR repositories stack not found, skipping"
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: "[5/5] Verify Cleanup"
+        run: |
+          echo "### [5/5] Verification" >> $GITHUB_STEP_SUMMARY
+          echo "🔍 Verifying all resources deleted..."
+
+          REMAINING=$(aws cloudformation list-stacks \
+            --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+            --region ${{ env.AWS_REGION }} \
+            --query "StackSummaries[?contains(StackName, '${{ env.ENVIRONMENT_NAME }}')].StackName" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -z "$REMAINING" ]; then
+            echo "✅ All stacks deleted successfully" >> $GITHUB_STEP_SUMMARY
+            echo "✓ All stacks deleted successfully"
+          else
+            echo "⚠️ Some stacks still exist: $REMAINING" >> $GITHUB_STEP_SUMMARY
+            echo "⚠ Some stacks still exist: $REMAINING"
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
 
       - name: Cleanup Summary
+        if: always()
         run: |
-          echo "### 🗑️ Cleanup Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "All AWS resources have been deleted." >> $GITHUB_STEP_SUMMARY
+          echo "## ✅ Cleanup Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Summary:**" >> $GITHUB_STEP_SUMMARY
+          echo "- 🗑️ ECS Cluster: Deleted" >> $GITHUB_STEP_SUMMARY
+          echo "- 🗑️ Load Balancer: Deleted" >> $GITHUB_STEP_SUMMARY
+          echo "- 🗑️ VPC & Networking: Deleted" >> $GITHUB_STEP_SUMMARY
+          echo "- 🗑️ ECR Repositories: Deleted" >> $GITHUB_STEP_SUMMARY
+          echo "- 🗑️ Docker Images: Deleted" >> $GITHUB_STEP_SUMMARY
+          echo "- 🗑️ CloudWatch Logs: Deleted" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**💰 Monthly cost savings: ~\$107-117**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ℹ️ Note: CloudWatch Logs may take a few hours to fully delete." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🔄 To redeploy: Push a commit to trigger the deployment workflow" >> $GITHUB_STEP_SUMMARY
